@@ -13,11 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.airbnb.epoxy.paging3
+
+package com.twisper.pagingdataepoxycontroller
 
 import android.annotation.SuppressLint
 import android.os.Handler
+import androidx.lifecycle.Lifecycle
 import androidx.paging.PagedList
+import androidx.paging.PagingData
 import androidx.recyclerview.widget.DiffUtil
 import com.airbnb.epoxy.EpoxyController
 import com.airbnb.epoxy.EpoxyModel
@@ -36,7 +39,7 @@ import com.airbnb.epoxy.EpoxyViewHolder
  *
  * @param T The type of the items in the [PagedList].
  */
-abstract class PagedListEpoxyController<T : Any>(
+abstract class PagingDataEpoxyController<T : Any>(
     /**
      * The handler to use for building models. By default this uses the main thread, but you can use
      * [EpoxyAsyncUtil.getAsyncBackgroundHandler] to do model building in the background.
@@ -52,14 +55,14 @@ abstract class PagedListEpoxyController<T : Any>(
      */
     diffingHandler: Handler = EpoxyController.defaultDiffingHandler,
     /**
-     * [PagedListEpoxyController] uses an [DiffUtil.ItemCallback] to detect changes between
+     * [PagingDataEpoxyController] uses an [DiffUtil.ItemCallback] to detect changes between
      * [PagedList]s. By default, it relies on simple object equality but you can provide a custom
      * one if you don't use all fields in the object in your models.
      */
     itemDiffCallback: DiffUtil.ItemCallback<T> = DEFAULT_ITEM_DIFF_CALLBACK as DiffUtil.ItemCallback<T>
 ) : EpoxyController(modelBuildingHandler, diffingHandler) {
     // this is where we keep the already built models
-    private val modelCache = PagedListModelCache(
+    private val modelCache = PagingDataModelCache(
         modelBuilder = { pos, item ->
             buildItemModel(pos, item)
         },
@@ -107,8 +110,12 @@ abstract class PagedListEpoxyController<T : Any>(
      * A diff will be calculated between this list and the previous list so you may still get calls
      * to [buildItemModel] with items from the previous list.
      */
-    fun submitList(newList: PagedList<T>?) {
-        modelCache.submitList(newList)
+    suspend fun submitData(pagingData: PagingData<T>) {
+        modelCache.submitData(pagingData)
+    }
+
+    fun submitData(lifecycle: Lifecycle, pagingData: PagingData<T>) {
+        modelCache.submitData(lifecycle, pagingData)
     }
 
     /**
@@ -124,7 +131,7 @@ abstract class PagedListEpoxyController<T : Any>(
 
     companion object {
         /**
-         * [PagedListEpoxyController] calculates a diff on top of the PagedList to check which
+         * [PagingDataEpoxyController] calculates a diff on top of the PagedList to check which
          * models are invalidated.
          * This is the default [DiffUtil.ItemCallback] which uses object equality.
          */

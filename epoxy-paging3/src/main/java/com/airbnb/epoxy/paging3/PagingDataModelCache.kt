@@ -13,19 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.airbnb.epoxy.paging3
+package com.twisper.pagingdataepoxycontroller
 
-import android.annotation.SuppressLint
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
-import androidx.paging.AsyncPagedListDiffer
-import androidx.paging.PagedList
-import androidx.recyclerview.widget.AsyncDifferConfig
+import androidx.lifecycle.Lifecycle
+import androidx.paging.AsyncPagingDataDiffer
+import androidx.paging.PagingData
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListUpdateCallback
-import com.airbnb.epoxy.EpoxyController
 import com.airbnb.epoxy.EpoxyModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.Executor
 
 /**
@@ -48,7 +49,7 @@ import java.util.concurrent.Executor
  * that thread we allow a special case of cache modification when a new list is being submitted,
  * and all cache access is marked with @Synchronize to ensure safety when this happens.
  */
-internal class PagedListModelCache<T : Any>(
+internal class PagingDataModelCache<T : Any>(
     private val modelBuilder: (itemIndex: Int, item: T?) -> EpoxyModel<*>,
     private val rebuildCallback: () -> Unit,
     private val itemDiffCallback: DiffUtil.ItemCallback<T>,
@@ -106,7 +107,7 @@ internal class PagedListModelCache<T : Any>(
         }
 
         private fun synchronizedWithCache(block: () -> Unit) {
-            synchronized(this@PagedListModelCache) {
+            synchronized(this@PagingDataModelCache) {
                 block()
             }
         }
@@ -127,61 +128,40 @@ internal class PagedListModelCache<T : Any>(
      */
     private fun assertUpdateCallbacksAllowed() {
         require(inSubmitList || Looper.myLooper() == modelBuildingHandler.looper) {
-            "The notify executor for your PagedList must use the same thread as the model building handler set in PagedListEpoxyController.modelBuildingHandler"
+            "The notify executor for your PagedList must use the same thread as the model building handler set in PagingDataEpoxyController.modelBuildingHandler"
         }
     }
 
-    @SuppressLint("RestrictedApi")
-    private val asyncDiffer = object : AsyncPagedListDiffer<T>(
-        updateCallback,
-        AsyncDifferConfig.Builder<T>(
-            itemDiffCallback
-        ).also { builder ->
-            if (diffExecutor != null) {
-                builder.setBackgroundThreadExecutor(diffExecutor)
-            }
+    private val asyncDiffer = AsyncPagingDataDiffer<T>(
+        diffCallback = itemDiffCallback,
+        updateCallback = updateCallback,
+        mainDispatcher = Executor { runnable: Runnable ->
+            modelBuildingHandler.post(runnable)
+        }.asCoroutineDispatcher(),
+        workerDispatcher = diffExecutor?.asCoroutineDispatcher() ?: Dispatchers.Default
+    )
 
-            // we have to reply on this private API, otherwise, paged list might be changed when models are being built,
-            // potentially creating concurrent modification problems.
-            builder.setMainThreadExecutor { runnable: Runnable ->
-                modelBuildingHandler.post(runnable)
-            }
-        }.build()
-    ) {
-        init {
-            if (modelBuildingHandler != EpoxyController.defaultModelBuildingHandler) {
-                try {
-                    // looks like AsyncPagedListDiffer in 1.x ignores the config.
-                    // Reflection to the rescue.
-                    val mainThreadExecutorField =
-                        AsyncPagedListDiffer::class.java.getDeclaredField("mMainThreadExecutor")
-                    mainThreadExecutorField.isAccessible = true
-                    mainThreadExecutorField.set(
-                        this,
-                        Executor {
-                            modelBuildingHandler.post(it)
-                        }
-                    )
-                } catch (t: Throwable) {
-                    val msg = "Failed to hijack update handler in AsyncPagedListDiffer." +
-                        "You can only build models on the main thread"
-                    Log.e("PagedListModelCache", msg, t)
-                    throw IllegalStateException(msg, t)
-                }
-            }
+    private val submitDataMutex = Mutex()
+
+    suspend fun submitData(pagingData: PagingData<T>) {
+        submitDataMutex.withLock {
+            inSubmitList = true
+            asyncDiffer.submitData(pagingData)
+            inSubmitList = false
         }
     }
 
     @Synchronized
-    fun submitList(pagedList: PagedList<T>?) {
+    fun submitData(lifecycle: Lifecycle, pagingData: PagingData<T>) {
         inSubmitList = true
-        asyncDiffer.submitList(pagedList)
+        asyncDiffer.submitData(lifecycle, pagingData)
         inSubmitList = false
     }
 
+
     @Synchronized
     fun getModels(): List<EpoxyModel<*>> {
-        val currentList = asyncDiffer.currentList ?: emptyList<T>()
+        val currentList = asyncDiffer.snapshot().items
 
         // The first time models are built the EpoxyController does so synchronously, so that
         // the UI can be ready immediately. To avoid concurrent modification issues with the PagedList
@@ -202,7 +182,8 @@ internal class PagedListModelCache<T : Any>(
 
         (0 until modelCache.size).forEach { position ->
             if (modelCache[position] == null) {
-                modelCache[position] = modelBuilder(position, currentList[position])
+
+                modelCache[position] = modelBuilder(position, currentList.elementAtOrNull(position))
             }
         }
 
@@ -218,7 +199,7 @@ internal class PagedListModelCache<T : Any>(
         originatingList: List<T>,
         initialModels: List<EpoxyModel<*>>
     ) {
-        if (asyncDiffer.currentList === originatingList) {
+        if (asyncDiffer.snapshot().items === originatingList) {
             modelCache.clear()
             modelCache.addAll(initialModels)
         }
@@ -245,9 +226,9 @@ internal class PagedListModelCache<T : Any>(
     }
 
     private fun triggerLoadAround(position: Int) {
-        asyncDiffer.currentList?.let {
+        asyncDiffer.snapshot().let {
             if (it.size > 0) {
-                it.loadAround(Math.min(position, it.size - 1))
+                asyncDiffer.getItem(Math.min(position, it.size - 1))
             }
         }
     }
